@@ -47,7 +47,7 @@ def correct_object(obj: bpy.types.Object, mesh: bpy.types.Mesh) -> None:
     obj.scale = (1, 1, 1)
     obj.data = mesh
 
-def apply_rules(objects: list, collection: bpy.types.Collection) -> Tuple[str]:
+def apply_rules(objects: list, collection: bpy.types.Collection, use_3d : bool, use_diagnol : bool, hide: bool = False) -> Tuple[str]:
     if len(objects) == 0:
         return ()
     objects_by_location = {str(tuple(map(int, obj.location))): obj.name for obj in collection.objects}
@@ -73,35 +73,53 @@ def apply_rules(objects: list, collection: bpy.types.Collection) -> Tuple[str]:
         for l in (-1, 1):
             x = playground[i + l][j][k]
             y = playground[i][j + l][k]
-            z = playground[i][j][k + l]
             xy = playground[i + l][j + l][k]
             x_y = playground[i + l][j - l][k]
-            xz = playground[i + l][j][k + l]
-            x_z = playground[i + l][j][k - l]
-            yz = playground[i][j + l][k + l]
-            y_z = playground[i][j + l][k - l]
-            xyz = playground[i + l][j + l][k + l]
-            x_yz = playground[i + l][j - l][k + l]
-            xy_z = playground[i + l][j + l][k - l]
-            x_y_z = playground[i + l][j - l][k - l]
 
             count_xy += sum((x, y, xy, x_y))
-            count_xz += sum((x, z, xz, x_z))
-            count_yz += sum((y, z, yz, y_z))
-            count_diag_xyz += sum((x, xy, xyz, xy_z))
-            count_diag_negxyz += sum((x, x_y, x_yz, x_y_z))
 
-        counts = (count_xy, count_xz, count_yz, count_diag_xyz, count_diag_negxyz)
-        alive = False # ignore rule 2, 4 only check for alive cells
-        # Rule 1                                                    # Rule 3
-        alive = (not(is_alive) and any(x == 3 for x in counts)) or is_alive and any(x == 2 or x == 3 for x in counts)
+            if use_3d:
+                z = playground[i][j][k + l]
+                xz = playground[i + l][j][k + l]
+                x_z = playground[i + l][j][k - l]
+                yz = playground[i][j + l][k + l]
+                y_z = playground[i][j + l][k - l]
+
+                count_xz += sum((x, z, xz, x_z))
+                count_yz += sum((y, z, yz, y_z))
+                
+                if use_diagnol:
+                    xyz = playground[i + l][j + l][k + l]
+                    x_yz = playground[i + l][j - l][k + l]
+                    xy_z = playground[i + l][j + l][k - l]
+                    x_y_z = playground[i + l][j - l][k - l]
+
+                    count_diag_xyz += sum((z, xy, xyz, xy_z))
+                    count_diag_negxyz += sum((z, x_y, x_yz, x_y_z))
+
+        if use_3d:
+            if use_diagnol:
+                counts = [count_xy, count_xz, count_yz, count_diag_xyz, count_diag_negxyz]
+            else:
+                counts = [count_xy, count_xz, count_yz]
+        else:
+            counts = [count_xy]
+
+        if is_alive:
+            #       Rule 3
+            alive = any(x == 2 or x == 3 for x in counts)
+            #           Rule 2                         Rule 4                                   
+            alive = not(all(x < 2 for x in counts) or any(x > 3 for x in counts))
+        else:
+            #       Rule 1
+            alive = any(x == 3 for x in counts)
 
         location = tuple(map(int, (i + x_min, j + y_min, k + z_min)))
         if alive:
             name = objects_by_location.get(str(location), None)
             if name is None:
                 new_obj = create_cell(location)
-                new_obj.hide_set(True)
+                new_obj.hide_set(hide)
                 name = new_obj.name
             alives.append(name) # get existing cell or creat new cell
     return tuple(alives)
@@ -126,13 +144,17 @@ def run_game(scene):
             frame_diffrence = current_frame - BGOL.last_frame
             if frame_diffrence < 0:
                 frame_diffrence = current_frame - start_frame
+                for obj in collection.objects:
+                    bpy.data.objects.remove(obj)
                 bpy.ops.bgol.load_setup()
             for i in range(frame_diffrence):
-                alive_objects_name = apply_rules(collection.objects, collection)
+                alive_objects_name = apply_rules(collection.objects, collection, BGOL.use_3d, BGOL.use_diagonal)
                 dead_objects_name = set(obj.name for obj in collection.objects).difference(alive_objects_name)
                 data_objects = bpy.data.objects
                 for name in dead_objects_name:
                     data_objects.remove(data_objects[name])
+                while bpy.data.orphans_purge() != 0:
+                    continue
             BGOL.last_frame = current_frame
 
 classes = []
@@ -150,27 +172,38 @@ class BGOL_PT_game_of_life(Panel):
     def draw(self, context: bpy.types.Context):
         layout = self.layout
         BGOL = context.preferences.addons[__package__].preferences
-        layout.operator(BGOL_OT_create_new_cell.bl_idname)
-        col = layout.column(align= True)
+        main_col = layout.column()
+        main_col.active = not BGOL.activ
+        main_col.operator(BGOL_OT_create_new_cell.bl_idname)
+        col = main_col.column(align= True)
         col.prop(BGOL, 'grid_location')
-        layout.operator(BGOL_OT_cleanup_cells.bl_idname)
-        layout.operator(BGOL_OT_cleanup_scene.bl_idname)
-        row = layout.row(align= True)
+        main_col.operator(BGOL_OT_cleanup_cells.bl_idname)
+        main_col.operator(BGOL_OT_cleanup_scene.bl_idname)
+        row = main_col.row(align= True)
         row.prop(BGOL, 'start_frame', text= "Start")
         row.prop(BGOL, 'end_frame', text= "End")
-        row = layout.row(align= True)
+        row = main_col.row(align= True)
         row.operator(BGOL_OT_load_setup.bl_idname)
         row.operator(BGOL_OT_save_setup.bl_idname)
-        col = layout.column(align= True)
+        col = main_col.column(align= True)
         row = col.row(align= True)
         row.prop(BGOL, 'processing_mode', expand= True)
+        row2 = col.row(align= True)
         if BGOL.processing_mode == 'pre':
             if BGOL.progress == -1:
-                col.operator(BGOL_OT_process.bl_idname)
+                row2.operator(BGOL_OT_process.bl_idname)
+                row2.prop(BGOL, 'use_3d', text= "", icon= "OUTLINER_DATA_EMPTY")
+                col2 = row2.column(align= True)
+                col2.active = BGOL.use_3d
+                col2.prop(BGOL, 'use_diagonal', text= "", icon= "AXIS_SIDE")
             else:
-                row2 = col.row(align= True)
                 row2.active = False
                 row2.prop(BGOL, 'progress', slider= True)
+        else:
+            row2.prop(BGOL, 'use_3d', icon= "OUTLINER_DATA_EMPTY")
+            col2 = row2.column(align= True)
+            col2.active = BGOL.use_3d
+            col2.prop(BGOL, 'use_diagonal', text= "", icon= "AXIS_SIDE")
         row = layout.row()
         row.scale_y = 1.5
         row.prop(BGOL, 'activ', toggle= 1)
@@ -277,7 +310,7 @@ class BGOL_OT_process(Operator):
         BGOL = context.preferences.addons[__package__].preferences
         collection = get_game_collection()
         objects = [collection.objects[name] for name in pre_process_data[-1]]
-        pre_process_data.append(apply_rules(objects, collection))
+        pre_process_data.append(apply_rules(objects, collection, BGOL.use_3d, BGOL.use_diagonal, True))
         self.frame += 1
         BGOL.progress = 100 * self.frame / self.length
         if self.frame == self.length:
@@ -303,7 +336,7 @@ class BGOL_OT_save_setup(Operator):
         BGOL = context.preferences.addons[__package__].preferences
         collection = get_game_collection()
         global base_case
-        base_case = [tuple(int(x) for x in obj.location) for obj in collection.objects]
+        base_case = [tuple(int(x) for x in obj.location) for obj in collection.objects if not obj.hide_get()]
         return {'FINISHED'}
 classes.append(BGOL_OT_save_setup)
 
@@ -313,14 +346,9 @@ class BGOL_OT_load_setup(Operator):
     bl_description = "Load the saved setup"
 
     def execute(self, context: bpy.types.Context):
-        collection = get_game_collection()
-        for obj in collection.objects:
-            bpy.data.objects.remove(obj)
         global base_case
         for location in base_case:
             create_cell(location)
-        while bpy.data.orphans_purge() != 0:
-            continue
         return {'FINISHED'}
 classes.append(BGOL_OT_load_setup)
 
@@ -356,6 +384,8 @@ class BGOL_preferences(AddonPreferences):
         if value and self.processing_mode == 'runtime':
             bpy.ops.bgol.load_setup()
     activ : BoolProperty(default= False, name= "Activ", description= "Activate the Game to change by the frames and set the base case on activation", get= get_activ, set= set_active)
+    use_3d : BoolProperty(default= True, name= "Use 3D", description= "Turn off to only use 2 dimension (normal Conway's Game of Life)")
+    use_diagonal : BoolProperty(default= True, name= "Use Diagonal", description= "Also use diagnal plans to calculate the game")
 classes.append(BGOL_preferences)
 
 def register():
