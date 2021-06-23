@@ -3,9 +3,10 @@ from bpy.types import Panel, Operator, AddonPreferences
 from bpy.props import IntVectorProperty, EnumProperty, IntProperty, BoolProperty
 from bpy.app.handlers import persistent
 import bl_math
+import bmesh
 from numpy import zeros
 from operator import itemgetter
-from typing import Tuple
+from typing import Tuple, Union
 
 def get_game_collection() -> bpy.types.Collection:
     collection = bpy.data.collections.get("Game of Life", None)
@@ -47,7 +48,36 @@ def correct_object(obj: bpy.types.Object, mesh: bpy.types.Mesh) -> None:
     obj.scale = (1, 1, 1)
     obj.data = mesh
 
-def apply_rules(objects: list, collection: bpy.types.Collection, use_3d : bool, use_diagnol : bool, hide: bool = False) -> Tuple[str]:
+def objects_to_mesh(name: str, objects: list):
+    mesh = bpy.data.meshes.new(name)
+    vertices = []
+    edges = []
+    faces = []
+    for obj in objects: # join objects
+        obj_mesh = obj.data
+        offset = len(vertices)
+        location = tuple(obj.location)
+        vertices += [tuple(y - x for x, y in zip(vert.co, location)) for vert in obj_mesh.vertices]
+        edges += [tuple(vert + offset for vert in edge.vertices) for edge in obj_mesh.edges]
+        faces += [tuple(vert + offset for vert in face.vertices) for face in obj_mesh.polygons]
+    mesh.from_pydata(vertices, edges, faces)
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bmesh.ops.weld_verts(bm, {'vert': bm.verts, 'edge': bm.edges, 'face': bm.faces})
+    bm.to_mesh(mesh)
+    bm.free()
+    # remove faces where all edges have more than 2 faces users
+    face_edges = []
+    for face in mesh.polygons:
+        face_edges += face.edge_keys
+    edges_3faces = [edge for edge in mesh.edge_keys if face_edges.count(edge) > 2]
+    vertices = [vert.co for vert in mesh.vertices]
+    edges = [edge.vertices for edge in obj_mesh.edges]
+    faces = [face.vertices for face in mesh.polygons if not all(edge in edges_3faces for edge in face.edge_keys)]
+    mesh.clear_geometry()
+    mesh.from_pydata(vertices, edges, faces)
+
+def apply_rules(objects: list, collection: bpy.types.Collection, use_3d : bool, use_diagnol : bool, hide: bool = False) -> bpy.types.Mesh:
     if len(objects) == 0:
         return ()
     objects_by_location = {str(tuple(map(int, obj.location))): obj.name for obj in collection.objects}
