@@ -1,25 +1,34 @@
 import bpy
 from bpy.types import Panel, Operator, AddonPreferences
-from bpy.props import IntVectorProperty, EnumProperty, IntProperty, BoolProperty
+from bpy.props import IntVectorProperty, IntProperty, BoolProperty, StringProperty
 from bpy.app.handlers import persistent
 import bl_math
 import bmesh
 from numpy import zeros
 from operator import itemgetter
-from typing import Tuple, List, Union
+from typing import Tuple, List
+from contextlib import suppress
 
-def get_game_collection() -> bpy.types.Collection:
-    collection = bpy.data.collections.get("Game of Life", None)
+def get_collection(name: str) -> bpy.types.Collection:
+    collection = bpy.data.collections.get(name, None)
     if collection is None:
-        collection = bpy.data.collections.new("Game of Life")
+        collection = bpy.data.collections.new(name)
         bpy.context.scene.collection.children.link(collection)
     return collection
 
-def link_to_collection(obj: bpy.types.Object) -> None:
+def get_finished_collection() -> bpy.types.Collection:
+    return get_collection('Processed Game')
+
+def get_game_collection() -> bpy.types.Collection:
+    return get_collection("Game of Life")
+
+def link_to_collection(collection: bpy.types.Collection, obj: bpy.types.Object) -> None:
     for coll in obj.users_collection:
         coll.objects.unlink(obj)
-    collection = get_game_collection()
     collection.objects.link(obj)
+
+def link_to_game_collection(obj: bpy.types.Object) -> None:
+    link_to_collection(get_game_collection(), obj)
 
 def get_cell_mesh(overwrite: bool = False) -> bpy.types.Mesh:
     mesh = bpy.data.meshes.get("Game of Life", None)
@@ -38,7 +47,7 @@ def create_cell(position : Tuple[int, int, int]) -> bpy.types.Object:
     obj = bpy.data.objects.new(f"Cell-{position}", get_cell_mesh())
     obj.location = position
     obj.lock_rotation = obj.lock_scale = (True, True, True)
-    link_to_collection(obj)
+    link_to_game_collection(obj)
     return obj
 
 def correct_object(obj: bpy.types.Object, mesh: bpy.types.Mesh) -> None:
@@ -48,7 +57,7 @@ def correct_object(obj: bpy.types.Object, mesh: bpy.types.Mesh) -> None:
     obj.scale = (1, 1, 1)
     obj.data = mesh
 
-def objects_to_mesh(name: str, objects: list):
+def objects_to_mesh(name: str, objects: list) -> list:
     mesh = bpy.data.meshes.new(name)
     vertices = []
     edges = []
@@ -61,34 +70,45 @@ def objects_to_mesh(name: str, objects: list):
         edges += [tuple(vert + offset for vert in edge.vertices) for edge in obj_mesh.edges]
         faces += [tuple(vert + offset for vert in face.vertices) for face in obj_mesh.polygons]
     mesh.from_pydata(vertices, edges, faces)
-    bm = bmesh.new()
-    bm.from_mesh(mesh)
-    bmesh.ops.weld_verts(bm, {'vert': bm.verts, 'edge': bm.edges, 'face': bm.faces})
-    bm.to_mesh(mesh)
-    bm.free()
-    # remove faces where all edges have more than 2 faces users
-    face_edges = []
-    for face in mesh.polygons:
-        face_edges += face.edge_keys
-    edges_3faces = [edge for edge in mesh.edge_keys if face_edges.count(edge) > 2]
-    vertices = [vert.co for vert in mesh.vertices]
-    edges = [edge.vertices for edge in obj_mesh.edges]
-    faces = [face.vertices for face in mesh.polygons if not all(edge in edges_3faces for edge in face.edge_keys)]
-    mesh.clear_geometry()
-    mesh.from_pydata(vertices, edges, faces)
-    
-def apply_rules(objects: list, collection: bpy.types.Collection, low_value: int, high_value: int ,use_3d : bool, use_diagnol : bool, combine_planes: bool, hide: bool = False) -> List[str]:
-    if len(objects) == 0:
-        return ()
-    objects_by_location = {str(tuple(map(int, obj.location))): obj.name for obj in collection.objects}
-    all_object_locations = [tuple(map(int, obj.location)) for obj in objects]
-    mins = [int(min(all_object_locations, key= itemgetter(i))[i] - 2) for i in range(3)]
-    maxs = [int(max(all_object_locations, key= itemgetter(i))[i] + 3) for i in range(3)]
+    return mesh
+
+def mesh_from_locations(mesh: bpy.types.Mesh, locations: List[Tuple]) -> None:
+    cube_data = {
+        'vertices' : [(0.5, 0.5, 0.5), (0.5, 0.5, -0.5), (0.5, -0.5, 0.5), (0.5, -0.5, -0.5), (-0.5, 0.5, 0.5), (-0.5, 0.5, -0.5), (-0.5, -0.5, 0.5), (-0.5, -0.5, -0.5)],
+        'edges' : [(5, 7), (1, 5), (0, 1), (7, 6), (2, 3), (4, 5), (2, 6), (0, 2), (7, 3), (6, 4), (4, 0), (3, 1)],
+        'faces' : [(0, 4, 6, 2), (3, 2, 6, 7), (7, 6, 4, 5), (5, 1, 3, 7), (1, 0, 2, 3), (5, 4, 0, 1)]
+    }
+    old_vertices = [tuple(vert.co) for vert in mesh.vertices]
+    old_edges = mesh.edge_keys.copy()
+    old_faces = [tuple(face.vertices) for face in mesh.polygons]
+    old_length = len(old_vertices)
+    missing_locations = int(len(locations) - old_length / len(cube_data['vertices']))
+    # add missing geometry
+    if missing_locations > 0:
+        for location in locations[-missing_locations: ]:
+            offset = len(old_vertices)
+            old_vertices += [tuple(y - x for x, y in zip(vert, location)) for vert in cube_data['vertices']]
+            old_edges += [tuple(vert + offset for vert in edge) for edge in cube_data['edges']]
+            old_faces += [tuple(vert + offset for vert in face) for face in cube_data['faces']]
+        mesh.clear_geometry()
+        mesh.from_pydata(old_vertices, old_edges, old_faces)
+
+def apply_vertices_to_shapekey(shapekey, locations):
+    vertices = []
+    data_vertices = [(0.5, 0.5, 0.5), (0.5, 0.5, -0.5), (0.5, -0.5, 0.5), (0.5, -0.5, -0.5), (-0.5, 0.5, 0.5), (-0.5, 0.5, -0.5), (-0.5, -0.5, 0.5), (-0.5, -0.5, -0.5)]
+    for location in locations:
+        vertices += [tuple(y - x for x, y in zip(vert, location)) for vert in data_vertices]
+    for vert, location in zip(shapekey.data, vertices):
+        vert.co = location
+
+def apply_rules(locations: List[Tuple], low_value: int, high_value: int ,use_3d : bool, use_diagnol : bool, combine_planes: bool, hide: bool = False) -> List[tuple]:
+    mins = [int(min(locations, key= itemgetter(i))[i] - 2) for i in range(3)]
+    maxs = [int(max(locations, key= itemgetter(i))[i] + 3) for i in range(3)]
     playground = zeros(tuple(i - j for i, j in zip(maxs, mins)), dtype= bool)
     possible_locations = []
 
     x_min, y_min, z_min = mins
-    for x, y, z in all_object_locations: # set alive celles
+    for x, y, z in locations: # set alive celles
         playground[x - x_min][y - y_min][z - z_min] = True
         for xi in (-1, 0, 1):
             for yi in (-1, 0, 1):
@@ -149,20 +169,14 @@ def apply_rules(objects: list, collection: bpy.types.Collection, low_value: int,
             #       Rule 1
             alive = any(x == high_value for x in counts)
 
-        location = tuple(map(int, (i + x_min, j + y_min, k + z_min)))
         if alive:
-            name = objects_by_location.get(str(location), None)
-            if name is None:
-                new_obj = create_cell(location)
-                new_obj.hide_viewport = hide
-                new_obj.hide_render = hide
-                name = new_obj.name
-            alives.append(name) # get existing cell or creat new cell
+            location = tuple(map(int, (i + x_min, j + y_min, k + z_min)))
+            alives.append(location)
     return alives
 
 classes = []
 base_case = []
-last_process_data = []
+process_locations = []
 
 class BGOL_PT_game_of_life(Panel):
     bl_idname = "BGOL_PT_game_of_life"
@@ -186,6 +200,7 @@ class BGOL_PT_game_of_life(Panel):
         row = main_col.row(align= True)
         row.operator(BGOL_OT_load_setup.bl_idname)
         row.operator(BGOL_OT_save_setup.bl_idname)
+        main_col.prop(BGOL, 'object_name')
         col = main_col.column(align= True)
         row2 = col.row(align= True)
         if BGOL.progress == -1:
@@ -196,7 +211,7 @@ class BGOL_PT_game_of_life(Panel):
             col2.prop(BGOL, 'use_diagonal', text= "", icon= "AXIS_SIDE")
         else:
             row2.active = False
-            row2.prop(BGOL, 'progress', slider= True)
+            row2.prop(BGOL, 'progress', slider= True, text= BGOL.progress_typ)
 classes.append(BGOL_PT_game_of_life)
 
 class BGOL_OT_cleanup_scene(Operator):
@@ -238,7 +253,7 @@ class BGOL_OT_append_selection(Operator):
         for obj in context.selected_objects:
             obj.location = [int(x) for x in obj.location]
             correct_object(obj, mesh)
-            link_to_collection(obj)
+            link_to_game_collection(obj)
         return {'FINISHED'}
 classes.append(BGOL_OT_append_selection)
 
@@ -276,78 +291,150 @@ class BGOL_OT_process(Operator):
     
     frame : IntProperty(options= {'HIDDEN'})
     length : IntProperty(options= {'HIDDEN'})
-
-    @classmethod
-    def poll(cls, context: bpy.types.Context):
-        BGOL = context.preferences.addons[__package__].preferences
-        return BGOL.processing_mode == 'pre'
+    biggest_mesh : IntProperty(options= {'HIDDEN'}, description= "saves length of of mesh with max locations")
+    object_name : StringProperty(options= {'HIDDEN'})
+    value_low : IntProperty()
+    value_high : IntProperty()
+    use_3d : BoolProperty()
+    use_diagonal : BoolProperty()
+    combine_planes : BoolProperty()
 
     def invoke(self, context: bpy.types.Context, event: bpy.types.Event):
         BGOL = context.preferences.addons[__package__].preferences
-        global last_process_data
+
+        self.object_name = BGOL.object_name
+        self.value_low = BGOL.value_low
+        self.value_high = BGOL.value_high
+        self.use_3d = BGOL.use_3d
+        self.use_diagonal = BGOL.use_diagonal
+        self.combine_planes = BGOL.combine_planes
+
+        global process_locations
+        process_locations.clear()
         bpy.ops.bgol.save_setup()
         collection = get_game_collection()
+        process_locations.append([tuple(map(int, obj.location)) for obj in collection.objects])
+        mesh = objects_to_mesh(self.object_name, collection.objects)
+        obj = bpy.data.objects.new(self.object_name, mesh)
+        self.object_name = obj.name
+        collection = get_finished_collection()
+        link_to_collection(collection, obj)
+        self.biggest_mesh = len(process_locations[-1])
         self.frame = 0
-        last_process_data.clear()
-        for obj in collection.objects:
-            hide_render = obj.hide_render
-            hide_viewport = obj.hide_viewport
-            obj.hide_render = False
-            obj.hide_viewport = False
-            obj.keyframe_insert('hide_render', frame= 1, group= 'Game of Life')
-            obj.keyframe_insert('hide_viewport', frame= 1, group= 'Game of Life')
-            obj.hide_render = True
-            obj.hide_viewport = True
-            obj.keyframe_insert('hide_render', frame= 2, group= 'Game of Life')
-            obj.keyframe_insert('hide_viewport', frame= 2, group= 'Game of Life')
-            obj.hide_render = hide_render
-            obj.hide_viewport = hide_viewport
-            last_process_data.append(obj.name)
         self.length = BGOL.end_frame - BGOL.start_frame
+        if self.length == 0:
+            return self.execute(context)
         self.timer = context.window_manager.event_timer_add(0.001, window= context.window)
         BGOL.progress = 100 * self.frame / self.length
+        BGOL.progress_typ = "Processing"
         context.window_manager.modal_handler_add(self)
         bpy.context.area.tag_redraw()
         return {'RUNNING_MODAL'}
 
     def modal(self, context: bpy.types.Context, event: bpy.types.Event):
         BGOL = context.preferences.addons[__package__].preferences
-        global last_process_data
-        collection = get_game_collection()
-        objects = [collection.objects[name] for name in last_process_data]
-        last_process_data = apply_rules(objects, collection, BGOL.value_low, BGOL.value_high, BGOL.use_3d, BGOL.use_diagonal, BGOL.combine_planes, True)
-        real_frame = self.frame + 1
-        for obj in [collection.objects[name] for name in last_process_data]:
-            hide_render = obj.hide_render
-            hide_viewport = obj.hide_viewport
-            obj.hide_render = False
-            obj.hide_viewport = False
-            obj.keyframe_insert('hide_render', frame= real_frame, group= 'Game of Life')
-            obj.keyframe_insert('hide_viewport', frame= real_frame, group= 'Game of Life')
-            obj.hide_render = True
-            obj.hide_viewport = True
-            obj.keyframe_insert('hide_render', frame= real_frame + 1, group= 'Game of Life')
-            obj.keyframe_insert('hide_viewport', frame= real_frame + 1, group= 'Game of Life')
-            obj.hide_render = hide_render
-            obj.hide_viewport = hide_viewport
+        global process_locations
         self.frame += 1
+        collection = get_finished_collection()
+        obj = collection.objects[self.object_name]
+        process_locations.append(apply_rules(process_locations[-1], self.value_low, self.value_high, self.use_3d, self.use_diagonal, self.combine_planes, True))
+        last_process_locations = process_locations[-1]
+        mesh_from_locations(obj.data, last_process_locations)
+        length_last_process_locations = len(last_process_locations)
+        self.biggest_mesh = length_last_process_locations if self.biggest_mesh < length_last_process_locations else self.biggest_mesh
         BGOL.progress = 100 * self.frame / self.length
+        bpy.context.area.tag_redraw()
         if self.frame == self.length:
             return self.execute(context)
-        bpy.context.area.tag_redraw()
         return {'PASS_THROUGH'}
 
     def execute(self, context: bpy.types.Context):
-        BGOL = context.preferences.addons[__package__].preferences
-        collection = get_game_collection()
-        for obj in collection.objects:
-            obj.keyframe_insert('hide_render', frame= 1, group= 'Game of Life')
-            obj.keyframe_insert('hide_viewport', frame= 1, group= 'Game of Life')
-        BGOL.progress = -1
-        context.window_manager.event_timer_remove(self.timer)
-        bpy.context.area.tag_redraw()
+        self.cancel(context)
+        bpy.ops.bgol.apply_process('INVOKE_DEFAULT', biggest_mesh= self.biggest_mesh, object_name= self.object_name)
         return {'FINISHED'}
+
+    def cancel(self, context):
+        with suppress():
+            context.window_manager.event_timer_remove(self.timer)
 classes.append(BGOL_OT_process)
+
+class BGOL_OT_apply_process(Operator):
+    bl_idname = "bgol.apply_process"
+    bl_label = "Apply Process"
+    bl_description = "apply process"
+    bl_options = {"INTERNAL"}
+
+    index : IntProperty(options= {'HIDDEN'})
+    length : IntProperty(options= {'HIDDEN'})
+    biggest_mesh : IntProperty(options= {'HIDDEN'}, description= "saves length of of mesh with max locations")
+    object_name : StringProperty(options= {'HIDDEN'})
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event):
+        BGOL = context.preferences.addons[__package__].preferences
+        global process_locations
+        max_length = self.biggest_mesh
+        collection = get_finished_collection()
+        obj = collection.objects[self.object_name]
+        shape_key = obj.shape_key_add(name= "Basis", from_mix= False)
+        shape_key.interpolation = 'KEY_LINEAR'
+        locations = process_locations[0]
+        length = len(locations)
+        locations = locations * int(max_length / length) + locations[ : max_length % length]
+        apply_vertices_to_shapekey(shape_key, locations)
+        shape_keys = obj.data.shape_keys
+        shape_keys.use_relative = False
+        shape_keys.eval_time = shape_key.frame
+        shape_keys.keyframe_insert('eval_time', frame= 1, group= 'Game of Life')
+
+        self.length = len(process_locations)
+        self.index = 0
+        if self.length <= 1:
+            return self.execute(context)
+
+        self.timer = context.window_manager.event_timer_add(0.001, window= context.window)
+        BGOL.progress = 100 * self.index / self.length
+        BGOL.progress_typ = "Converting"
+        context.window_manager.modal_handler_add(self)
+        bpy.context.area.tag_redraw()
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context: bpy.types.Context, event: bpy.types.Event):
+        BGOL = context.preferences.addons[__package__].preferences
+        global process_locations
+        max_length = self.biggest_mesh
+        collection = get_finished_collection()
+        obj = collection.objects[self.object_name]
+        self.index += 1
+        i = self.index + 1
+        locations = process_locations[self.index]
+        length = len(locations)
+        locations = locations * int(max_length / length) + locations[ : max_length % length]
+        shape_key = obj.shape_key_add(name= "Frame %i" %i, from_mix= False)
+        shape_key.interpolation = 'KEY_LINEAR'
+        apply_vertices_to_shapekey(shape_key, locations)
+        shape_keys = obj.data.shape_keys
+        shape_keys.eval_time = shape_key.frame
+        shape_keys.keyframe_insert('eval_time', frame= i, group= 'Game of Life')
+        
+        BGOL.progress = 100 * self.index / self.length
+        bpy.context.area.tag_redraw()
+        if i >= self.length:
+            return self.execute(context)
+        return {'PASS_THROUGH'}
+
+    def execute(self, context: bpy.types.Context):
+        self.cancel(context)
+        return {'FINISHED'}
+
+    def cancel(self, context):
+        global process_locations
+        process_locations.clear()
+        BGOL = context.preferences.addons[__package__].preferences
+        with suppress():
+            context.window_manager.event_timer_remove(self.timer)
+        BGOL.progress = -1
+        bpy.context.area.tag_redraw()
+classes.append(BGOL_OT_apply_process)
 
 class BGOL_OT_save_setup(Operator):
     bl_idname = "bgol.save_setup"
@@ -395,6 +482,8 @@ class BGOL_preferences(AddonPreferences):
     combine_planes : BoolProperty(default= False, name= "Combine Planes")
     value_low : IntProperty(name= "low value", default= 2)
     value_high : IntProperty(name= "high value", default= 3)
+    object_name : StringProperty(name= "Processed Name", description= "Name for the processed game", default= "Processed")
+    progress_typ : StringProperty()
 
     def draw(self, context):
         layout = self.layout
