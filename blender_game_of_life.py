@@ -4,10 +4,15 @@ from bpy.props import IntVectorProperty, IntProperty, BoolProperty, StringProper
 from bpy.app.handlers import persistent
 import bl_math
 import bmesh
+import numpy
 from numpy import zeros
 from operator import itemgetter
 from typing import Tuple, List
 from contextlib import suppress
+import threading
+import queue
+import multiprocessing
+import sys
 
 def get_collection(name: str) -> bpy.types.Collection:
     collection = bpy.data.collections.get(name, None)
@@ -72,7 +77,7 @@ def objects_to_mesh(name: str, objects: list) -> list:
     mesh.from_pydata(vertices, edges, faces)
     return mesh
 
-def mesh_from_locations(mesh: bpy.types.Mesh, locations: List[Tuple]) -> None:
+def mesh_from_locations(mesh: bpy.types.Mesh, locations: List[Tuple], length: int) -> None:
     cube_data = {
         'vertices' : [(0.5, 0.5, 0.5), (0.5, 0.5, -0.5), (0.5, -0.5, 0.5), (0.5, -0.5, -0.5), (-0.5, 0.5, 0.5), (-0.5, 0.5, -0.5), (-0.5, -0.5, 0.5), (-0.5, -0.5, -0.5)],
         'edges' : [(5, 7), (1, 5), (0, 1), (7, 6), (2, 3), (4, 5), (2, 6), (0, 2), (7, 3), (6, 4), (4, 0), (3, 1)],
@@ -93,7 +98,7 @@ def mesh_from_locations(mesh: bpy.types.Mesh, locations: List[Tuple]) -> None:
         mesh.clear_geometry()
         mesh.from_pydata(old_vertices, old_edges, old_faces)
 
-def apply_vertices_to_shapekey(shapekey, locations):
+def apply_vertices_to_shapekey(shapekey: bpy.types.ShapeKey, locations: list) -> None:
     vertices = []
     data_vertices = [(0.5, 0.5, 0.5), (0.5, 0.5, -0.5), (0.5, -0.5, 0.5), (0.5, -0.5, -0.5), (-0.5, 0.5, 0.5), (-0.5, 0.5, -0.5), (-0.5, -0.5, 0.5), (-0.5, -0.5, -0.5)]
     for location in locations:
@@ -101,7 +106,47 @@ def apply_vertices_to_shapekey(shapekey, locations):
     for vert, location in zip(shapekey.data, vertices):
         vert.co = location
 
-def apply_rules(locations: List[Tuple], low_value: int, high_value: int ,use_3d : bool, use_diagnol : bool, combine_planes: bool, hide: bool = False) -> List[tuple]:
+def apply_rules(possible_location: tuple, playground: zeros, mins: tuple, low_value: int, high_value: int, use_3d : bool) -> list:
+    x_min, y_min, z_min = mins
+    i, j, k = possible_location
+    is_alive = playground[i][j][k]
+    total_count = 0
+    for l in (-1, 1):
+        x = playground[i + l][j][k]
+        y = playground[i][j + l][k]
+        xy = playground[i + l][j + l][k]
+        x_y = playground[i + l][j - l][k]
+
+        total_count += sum((x, y, xy, x_y))
+
+        if use_3d:
+            z = playground[i][j][k + l]
+            xz = playground[i + l][j][k + l]
+            x_z = playground[i + l][j][k - l]
+            yz = playground[i][j + l][k + l]
+            y_z = playground[i][j + l][k - l]
+            xyz = playground[i + l][j + l][k + l]
+            x_yz = playground[i + l][j - l][k + l]
+            xy_z = playground[i + l][j + l][k - l]
+            x_y_z = playground[i + l][j - l][k - l]
+
+            total_count += sum((z, xz, x_z, yz, y_z, xyz, x_yz, xy_z, x_y_z))
+
+    if is_alive:
+        #       Rule 3
+        alive = total_count == low_value or total_count == high_value
+        #           Rule 2                         Rule 4                                   
+        alive = not(total_count < low_value or total_count > high_value)
+    else:
+        #       Rule 1
+        alive = total_count == high_value
+
+    if alive:
+        location = tuple(map(int, (i + x_min, j + y_min, k + z_min)))
+        return [location]
+    return []
+
+def setup_rules(locations: List[Tuple], low_value: int, high_value: int, use_3d : bool) -> None:
     mins = [int(min(locations, key= itemgetter(i))[i] - 2) for i in range(3)]
     maxs = [int(max(locations, key= itemgetter(i))[i] + 3) for i in range(3)]
     playground = zeros(tuple(i - j for i, j in zip(maxs, mins)), dtype= bool)
@@ -115,68 +160,24 @@ def apply_rules(locations: List[Tuple], low_value: int, high_value: int ,use_3d 
                 for zi in (-1, 0, 1):
                     possible_locations.append((x + xi - x_min, y + yi - y_min, z + zi - z_min))
     possible_locations = set(possible_locations)
+    executable = sys.executable
+    sys.executable = bpy.app.binary_path_python
+    with multiprocessing.Pool() as pool:
+        output = pool.map(lambda x : apply_rules(x, playground, mins, low_value, high_value, use_3d))
+    sys.executable = executable
+    l = []
+    map(l.extend, output)
+    return numpy.asarray(l)
 
-    alives = []
-    for i, j, k in possible_locations:
-        is_alive = playground[i][j][k]
-        count_xy = count_xz = count_yz = count_diag_xyz = count_diag_negxyz = total_count = 0
-        for l in (-1, 1):
-            x = playground[i + l][j][k]
-            y = playground[i][j + l][k]
-            xy = playground[i + l][j + l][k]
-            x_y = playground[i + l][j - l][k]
-
-            count_xy += sum((x, y, xy, x_y))
-            total_count += sum((x, y, xy, x_y))
-
-            if use_3d:
-                z = playground[i][j][k + l]
-                xz = playground[i + l][j][k + l]
-                x_z = playground[i + l][j][k - l]
-                yz = playground[i][j + l][k + l]
-                y_z = playground[i][j + l][k - l]
-
-                count_xz += sum((x, z, xz, x_z))
-                count_yz += sum((y, z, yz, y_z))
-                total_count += sum((z, xz, x_z, yz, y_z))
-                
-                if use_diagnol:
-                    xyz = playground[i + l][j + l][k + l]
-                    x_yz = playground[i + l][j - l][k + l]
-                    xy_z = playground[i + l][j + l][k - l]
-                    x_y_z = playground[i + l][j - l][k - l]
-
-                    count_diag_xyz += sum((z, xy, xyz, xy_z))
-                    count_diag_negxyz += sum((z, x_y, x_yz, x_y_z))
-                    total_count += sum((xyz, x_yz, xy_z, x_y_z))
-        if combine_planes:
-            counts = [total_count]
-        else:
-            if use_3d:
-                if use_diagnol:
-                    counts = [count_xy, count_xz, count_yz, count_diag_xyz, count_diag_negxyz]
-                else:
-                    counts = [count_xy, count_xz, count_yz]
-            else:
-                counts = [count_xy]
-
-        if is_alive:
-            #       Rule 3
-            alive = any(x == low_value or x == high_value for x in counts)
-            #           Rule 2                         Rule 4                                   
-            alive = not(all(x < low_value for x in counts) or any(x > high_value for x in counts))
-        else:
-            #       Rule 1
-            alive = any(x == high_value for x in counts)
-
-        if alive:
-            location = tuple(map(int, (i + x_min, j + y_min, k + z_min)))
-            alives.append(location)
-    return alives
+def process(process_queue, length, locations, value_low, value_high, use_3d):
+    for i in range(length):
+        locations = setup_rules(locations, value_low, value_high, use_3d)
+        process_queue.put_nowait(locations)
 
 classes = []
 base_case = []
 process_locations = []
+process_queue = queue.SimpleQueue()
 
 class BGOL_PT_game_of_life(Panel):
     bl_idname = "BGOL_PT_game_of_life"
@@ -206,9 +207,6 @@ class BGOL_PT_game_of_life(Panel):
         if BGOL.progress == -1:
             row2.operator(BGOL_OT_process.bl_idname)
             row2.prop(BGOL, 'use_3d', text= "", icon= "OUTLINER_DATA_EMPTY")
-            col2 = row2.column(align= True)
-            col2.active = BGOL.use_3d
-            col2.prop(BGOL, 'use_diagonal', text= "", icon= "AXIS_SIDE")
         else:
             row2.active = False
             row2.prop(BGOL, 'progress', slider= True, text= BGOL.progress_typ)
@@ -291,27 +289,17 @@ class BGOL_OT_process(Operator):
     
     frame : IntProperty(options= {'HIDDEN'})
     length : IntProperty(options= {'HIDDEN'})
-    biggest_mesh : IntProperty(options= {'HIDDEN'}, description= "saves length of of mesh with max locations")
     object_name : StringProperty(options= {'HIDDEN'})
-    value_low : IntProperty()
-    value_high : IntProperty()
-    use_3d : BoolProperty()
-    use_diagonal : BoolProperty()
-    combine_planes : BoolProperty()
 
     def invoke(self, context: bpy.types.Context, event: bpy.types.Event):
         BGOL = context.preferences.addons[__package__].preferences
 
         self.object_name = BGOL.object_name
-        self.value_low = BGOL.value_low
-        self.value_high = BGOL.value_high
-        self.use_3d = BGOL.use_3d
-        self.use_diagonal = BGOL.use_diagonal
-        self.combine_planes = BGOL.combine_planes
 
-        global process_locations
+        global process_locations, process_queue
         process_locations.clear()
         bpy.ops.bgol.save_setup()
+
         collection = get_game_collection()
         process_locations.append([tuple(map(int, obj.location)) for obj in collection.objects])
         mesh = objects_to_mesh(self.object_name, collection.objects)
@@ -319,13 +307,15 @@ class BGOL_OT_process(Operator):
         self.object_name = obj.name
         collection = get_finished_collection()
         link_to_collection(collection, obj)
-        self.biggest_mesh = len(process_locations[-1])
-        self.frame = 0
         self.length = BGOL.end_frame - BGOL.start_frame
         if self.length == 0:
             return self.execute(context)
+
+        self.t = threading.Thread(target= process, args= (process_queue, self.length, process_locations[-1], BGOL.value_low, BGOL.value_high, BGOL.use_3d))
+        self.t.start()
+
         self.timer = context.window_manager.event_timer_add(0.001, window= context.window)
-        BGOL.progress = 100 * self.frame / self.length
+        BGOL.progress = 0
         BGOL.progress_typ = "Processing"
         context.window_manager.modal_handler_add(self)
         bpy.context.area.tag_redraw()
@@ -333,27 +323,33 @@ class BGOL_OT_process(Operator):
 
     def modal(self, context: bpy.types.Context, event: bpy.types.Event):
         BGOL = context.preferences.addons[__package__].preferences
-        global process_locations
-        self.frame += 1
+        global process_locations, process_queue
+
         collection = get_finished_collection()
         obj = collection.objects[self.object_name]
-        process_locations.append(apply_rules(process_locations[-1], self.value_low, self.value_high, self.use_3d, self.use_diagonal, self.combine_planes, True))
-        last_process_locations = process_locations[-1]
-        mesh_from_locations(obj.data, last_process_locations)
-        length_last_process_locations = len(last_process_locations)
-        self.biggest_mesh = length_last_process_locations if self.biggest_mesh < length_last_process_locations else self.biggest_mesh
-        BGOL.progress = 100 * self.frame / self.length
-        bpy.context.area.tag_redraw()
-        if self.frame == self.length:
+
+        while not process_queue.empty():
+            locations, length = process_queue.get_nowait()
+            process_locations.append(locations)
+            mesh_from_locations(obj.data, locations)
+
+        frame = len(process_locations) - 1
+        BGOL.progress = 100 * frame / self.length
+        with suppress():
+            bpy.context.area.tag_redraw()
+        if frame == self.length:
             return self.execute(context)
         return {'PASS_THROUGH'}
 
     def execute(self, context: bpy.types.Context):
         self.cancel(context)
-        bpy.ops.bgol.apply_process('INVOKE_DEFAULT', biggest_mesh= self.biggest_mesh, object_name= self.object_name)
+        global process_locations
+        biggest_mesh = len(max(process_locations, key= lambda p: len(p)))
+        bpy.ops.bgol.apply_process('INVOKE_DEFAULT', biggest_mesh= biggest_mesh, object_name= self.object_name)
         return {'FINISHED'}
 
     def cancel(self, context):
+        self.t.join()
         with suppress():
             context.window_manager.event_timer_remove(self.timer)
 classes.append(BGOL_OT_process)
@@ -478,8 +474,6 @@ class BGOL_preferences(AddonPreferences):
     start_frame : IntProperty(name= "Startframe", default= 1)
     end_frame : IntProperty(name= 'Endframe', default= 250)
     use_3d : BoolProperty(default= True, name= "Use 3D", description= "Turn off to only use 2 dimension (normal Conway's Game of Life)")
-    use_diagonal : BoolProperty(default= True, name= "Use Diagonal", description= "Also use diagnal plans to calculate the game")
-    combine_planes : BoolProperty(default= False, name= "Combine Planes")
     value_low : IntProperty(name= "low value", default= 2)
     value_high : IntProperty(name= "high value", default= 3)
     object_name : StringProperty(name= "Processed Name", description= "Name for the processed game", default= "Processed")
@@ -487,7 +481,6 @@ class BGOL_preferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, 'combine_planes')
         layout.prop(self, 'value_low')
         layout.prop(self, 'value_high')
 classes.append(BGOL_preferences)
