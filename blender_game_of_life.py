@@ -477,7 +477,7 @@ class BGOL_preferences(AddonPreferences):
     progress : IntProperty(name= "Progress", default= -1 ,min= -1, max= 100, soft_min= 0, subtype= 'PERCENTAGE')
     start_frame : IntProperty(name= "Startframe", default= 1)
     end_frame : IntProperty(name= 'Endframe', default= 250)
-    use_3d : BoolProperty(default= True, name= "Use 3D", description= "Turn off to only use 2 dimension (normal Conway's Game of Life)")
+    use_3d : BoolProperty(default= False, name= "Use 3D", description= "Turn off to only use 2 dimension (normal Conway's Game of Life)")
     use_diagonal : BoolProperty(default= True, name= "Use Diagonal", description= "Also use diagnal plans to calculate the game")
     combine_planes : BoolProperty(default= False, name= "Combine Planes")
     value_low : IntProperty(name= "low value", default= 2)
