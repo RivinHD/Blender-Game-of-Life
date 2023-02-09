@@ -325,7 +325,7 @@ class BGOL_OT_process(Operator):
         if self.length == 0:
             return self.execute(context)
         self.timer = context.window_manager.event_timer_add(0.001, window= context.window)
-        BGOL.progress = 100 * self.frame / self.length
+        BGOL.progress = int(100 * self.frame / self.length)
         BGOL.progress_typ = "Processing"
         context.window_manager.modal_handler_add(self)
         bpy.context.area.tag_redraw()
@@ -342,7 +342,7 @@ class BGOL_OT_process(Operator):
         mesh_from_locations(obj.data, last_process_locations)
         length_last_process_locations = len(last_process_locations)
         self.biggest_mesh = length_last_process_locations if self.biggest_mesh < length_last_process_locations else self.biggest_mesh
-        BGOL.progress = 100 * self.frame / self.length
+        BGOL.progress = int(100 * self.frame / self.length)
         bpy.context.area.tag_redraw()
         if self.frame == self.length:
             return self.execute(context)
@@ -392,7 +392,7 @@ class BGOL_OT_apply_process(Operator):
             return self.execute(context)
 
         self.timer = context.window_manager.event_timer_add(0.001, window= context.window)
-        BGOL.progress = 100 * self.index / self.length
+        BGOL.progress = int(100 * self.index / self.length)
         BGOL.progress_typ = "Converting"
         context.window_manager.modal_handler_add(self)
         bpy.context.area.tag_redraw()
@@ -416,7 +416,7 @@ class BGOL_OT_apply_process(Operator):
         shape_keys.eval_time = shape_key.frame
         shape_keys.keyframe_insert('eval_time', frame= i, group= 'Game of Life')
         
-        BGOL.progress = 100 * self.index / self.length
+        BGOL.progress = int(100 * self.index / self.length)
         bpy.context.area.tag_redraw()
         if i >= self.length:
             return self.execute(context)
@@ -468,7 +468,7 @@ class BGOL_preferences(AddonPreferences):
     def get_grid_location(self):
         obj = bpy.context.object
         if obj:
-            return tuple(obj.location)
+            return tuple(int(i) for i in obj.location)
         return (0, 0, 0)
     def set_grid_location(self, value):
         obj = bpy.context.object
